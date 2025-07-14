@@ -63,6 +63,7 @@ import os
 from colosseum.rlbench.utils import name_to_class
 from colosseum import TASKS_PY_FOLDER
 from rvt.utils.t5_encoder import T5Embedder
+from rvt.models.remote_agent import WebsocketClientPolicyAgent
 
 def load_agent(
     model_path=None,
@@ -173,10 +174,12 @@ def eval(
     visualize_bbox=False,
     zoom_in=False,
     lang_type='clip',
+    agent_type='original',
 ):
-    agent.eval()
-    if isinstance(agent, rvt_agent.RVTAgent):
-        agent.load_clip()
+    if agent_type != 'remote':
+        agent.eval()
+        if isinstance(agent, rvt_agent.RVTAgent):
+            agent.load_clip()
 
     camera_resolution = [IMAGE_SIZE, IMAGE_SIZE]
     obs_config = utils.create_obs_config(CAMERAS, camera_resolution, method_name="")
@@ -312,6 +315,7 @@ def eval(
                 visual_prompt_type=visual_prompt_type,
                 visualize=visualize,
                 visualize_save_dir=visualize_save_dir,
+                agent_type=agent_type,
             )
             try:
                 for replay_transition in generator:
@@ -453,7 +457,8 @@ def eval(
         csv_fp.close()
 
     # set agent to back train mode
-    agent.train()
+    if agent_type != 'remote':
+        agent.train()
 
     return scores
 
@@ -533,29 +538,35 @@ def _eval(args):
                 print(f"Skipping model_idx={model_idx} for args.tasks={args.tasks}")
                 continue
 
-        if not (args.peract_official):
-            agent = load_agent(
-                model_path=model_path,
-                exp_cfg_path=args.exp_cfg_path,
-                mvt_cfg_path=args.mvt_cfg_path,
-                eval_log_dir=args.eval_log_dir,
-                device=args.device,
-                use_input_place_with_mean=args.use_input_place_with_mean,
-                lang_type=args.lang_type,
-            )
-
+        if args.agent_type == 'remote':
+            agent = WebsocketClientPolicyAgent(host="114.212.189.99", port=8000)
             agent_eval_log_dir = os.path.join(
                 args.eval_log_dir, os.path.basename(model_path).split(".")[0]
             )
         else:
-            agent = load_agent(
-                peract_official=args.peract_official,
-                peract_model_dir=args.peract_model_dir,
-                device=args.device,
-                use_input_place_with_mean=args.use_input_place_with_mean,
-                lang_type=args.lang_type,
-            )
-            agent_eval_log_dir = os.path.join(args.eval_log_dir, "final")
+            if not (args.peract_official):
+                agent = load_agent(
+                    model_path=model_path,
+                    exp_cfg_path=args.exp_cfg_path,
+                    mvt_cfg_path=args.mvt_cfg_path,
+                    eval_log_dir=args.eval_log_dir,
+                    device=args.device,
+                    use_input_place_with_mean=args.use_input_place_with_mean,
+                    lang_type=args.lang_type,
+                )
+
+                agent_eval_log_dir = os.path.join(
+                    args.eval_log_dir, os.path.basename(model_path).split(".")[0]
+                )
+            else:
+                agent = load_agent(
+                    peract_official=args.peract_official,
+                    peract_model_dir=args.peract_model_dir,
+                    device=args.device,
+                    use_input_place_with_mean=args.use_input_place_with_mean,
+                    lang_type=args.lang_type,
+                )
+                agent_eval_log_dir = os.path.join(args.eval_log_dir, "final")
 
         os.makedirs(agent_eval_log_dir, exist_ok=True)
         scores = eval(
@@ -577,6 +588,7 @@ def _eval(args):
             visualize_bbox=args.visualize_bbox,
             zoom_in=args.zoom_in,
             lang_type=args.lang_type,
+            agent_type=args.agent_type,
         )
         print(f"model {model_path}, scores {scores}")
         task_scores = {}

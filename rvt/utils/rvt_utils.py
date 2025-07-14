@@ -235,7 +235,7 @@ def get_eval_parser():
     parser.add_argument("--visualize_root_dir", type=str, default="")
     parser.add_argument("--colosseum", action="store_true", default=False)
     parser.add_argument("--lang_type", type=str, default='clip')
-
+    parser.add_argument("--agent_type", type=str, default='original')
     return parser
 
 
