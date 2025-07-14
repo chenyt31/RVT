@@ -10,8 +10,64 @@ import sys
 
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
 
+def draw_red_bbox_on_tensor_batch(img: torch.Tensor, visual_prompt_wpt_img_loc: torch.Tensor, box_size=5):
+    """
+    在 RGB 通道（3:6）上画红框（不使用for-loop，支持批处理）
+    """
+    B, N, C, H, W = img.shape
+    device = img.device
+    dtype = img.dtype
+
+    # Clone 以防止原地修改
+    img = img.clone()
+
+    # 提取坐标
+    x_center = visual_prompt_wpt_img_loc[..., 0].long().flatten()  # (B*N,)
+    y_center = visual_prompt_wpt_img_loc[..., 1].long().flatten()  # (B*N,)
+
+    # 创建 batch 和视角索引
+    b_idx = torch.arange(B, device=device).view(B, 1).repeat(1, N).flatten()
+    n_idx = torch.arange(N, device=device).repeat(B)
+
+    # RGB 通道索引：3(R), 4(G), 5(B)
+    R_ch, G_ch, B_ch = 3, 4, 5
+
+    # ------- 横边（上+下） -------
+    for dx in range(-box_size, box_size + 1):
+        x = (x_center + dx).clamp(0, W - 1)
+
+        y_up = (y_center - box_size).clamp(0, H - 1)
+        y_down = (y_center + box_size).clamp(0, H - 1)
+
+        # 上边红线
+        img[b_idx, n_idx, R_ch, y_up, x] = 1
+        img[b_idx, n_idx, G_ch, y_up, x] = 0
+        img[b_idx, n_idx, B_ch, y_up, x] = 0
+
+        # 下边红线
+        img[b_idx, n_idx, R_ch, y_down, x] = 1
+        img[b_idx, n_idx, G_ch, y_down, x] = 0
+        img[b_idx, n_idx, B_ch, y_down, x] = 0
+
+    # ------- 竖边（左+右） -------
+    for dy in range(-box_size, box_size + 1):
+        y = (y_center + dy).clamp(0, H - 1)
+
+        x_left = (x_center - box_size).clamp(0, W - 1)
+        x_right = (x_center + box_size).clamp(0, W - 1)
+
+        # 左边红线
+        img[b_idx, n_idx, R_ch, y, x_left] = 1
+        img[b_idx, n_idx, G_ch, y, x_left] = 0
+        img[b_idx, n_idx, B_ch, y, x_left] = 0
+
+        # 右边红线
+        img[b_idx, n_idx, R_ch, y, x_right] = 1
+        img[b_idx, n_idx, G_ch, y, x_right] = 0
+        img[b_idx, n_idx, B_ch, y, x_right] = 0
+
+    return img
 
 def place_pc_in_cube(
     pc, app_pc=None, with_mean_or_bounds=True, scene_bounds=None, no_op=False
@@ -98,6 +154,9 @@ def trans_pc(pc, loc, sca):
 
     # reverse transformation to obtain app_pc in original frame
     def rev_trans(x):
+        # assert isinstance(x, torch.Tensor)
+        if isinstance(x, list):
+            return [(x_i / sca) + _loc for x_i, _loc in zip(x, loc)]
         assert isinstance(x, torch.Tensor)
         return (x / sca) + loc
 

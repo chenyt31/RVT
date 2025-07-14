@@ -21,7 +21,7 @@ from rvt.utils.peract_utils import (
     VOXEL_SIZES,
 )
 from yarr.replay_buffer.wrappers.pytorch_replay_buffer import PyTorchReplayBuffer
-
+from rvt.utils.t5_encoder import T5Embedder
 
 def get_dataset(
     tasks,
@@ -37,6 +37,7 @@ def get_dataset(
     num_workers,
     only_train,
     sample_distribution_mode="transition_uniform",
+    use_t5_encoder=True,
 ):
 
     train_replay_buffer = create_replay(
@@ -60,10 +61,12 @@ def get_dataset(
         clip_model, _ = clip.load("RN50", device="cpu")  # CLIP-ResNet50
         clip_model = clip_model.to(device)
         clip_model.eval()
+        if use_t5_encoder:
+            t5_embedder = T5Embedder(from_pretrained="google/t5-v1_1-xxl", model_max_length=77, device=device, local_files_only=True)
     except RuntimeError:
         print("WARNING: Setting Clip to None. Will not work if replay not on disk.")
         clip_model = None
-
+        t5_embedder = None
     for task in tasks:  # for each task
         # print("---- Preparing the data for {} task ----".format(task), flush=True)
         EPISODES_FOLDER_TRAIN = f"train/{task}/all_variations/episodes"
@@ -105,6 +108,7 @@ def get_dataset(
             episode_folder=EPISODE_FOLDER,
             variation_desriptions_pkl=VARIATION_DESCRIPTIONS_PKL,
             clip_model=clip_model,
+            t5_embedder=t5_embedder,
             device=device,
         )
 
@@ -127,13 +131,16 @@ def get_dataset(
                 episode_folder=EPISODE_FOLDER,
                 variation_desriptions_pkl=VARIATION_DESCRIPTIONS_PKL,
                 clip_model=clip_model,
+                t5_embedder=t5_embedder,
                 device=device,
             )
 
     # delete the CLIP model since we have already extracted language features
     del clip_model
+    if use_t5_encoder:
+        del t5_embedder
     with torch.cuda.device(device):
-        torch.cuda.empty_cache()
+        torch.cuda.empty_cache()    
 
     # wrap buffer with PyTorch dataset and make iterator
     train_wrapped_replay = PyTorchReplayBuffer(

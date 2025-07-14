@@ -4,16 +4,52 @@
 
 import copy
 import torch
+import numpy as np
+import os
 
 from torch import nn
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 
 import rvt.mvt.utils as mvt_utils
 
 from rvt.mvt.mvt_single import MVT as MVTSingle
 from rvt.mvt.config import get_cfg_defaults
 from rvt.mvt.renderer import BoxRenderer
+import matplotlib.pyplot as plt
 
+def visualize_tensor(tensor, save_path=None):
+    """
+    Visualize a tensor of shape (3, 3, 224, 224) as three separate images.
+    Each image will show the three channels (RGB) of the corresponding view.
+    
+    Args:
+        tensor: torch.Tensor of shape (3, 3, 224, 224)
+        save_path: str, path to save the visualization. If None, only display the image.
+    """
+    # Convert tensor to numpy array
+    tensor_np = tensor.detach().cpu().numpy()
+    
+    # Create a figure with 3 subplots
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    
+    # Normalize the values to [0, 1] range
+    tensor_np = (tensor_np - tensor_np.min()) / (tensor_np.max() - tensor_np.min())
+    
+    # Plot each view
+    for i in range(3):
+        # Transpose from (3, 224, 224) to (224, 224, 3) for RGB display
+        img = np.transpose(tensor_np[i], (1, 2, 0))
+        axes[i].imshow(img)
+        axes[i].set_title(f'View {i+1}')
+        axes[i].axis('off')
+    
+    plt.tight_layout()
+    
+    if save_path is not None:
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=100, bbox_inches='tight')
+        print(f"Image saved to {save_path}")
 
 class MVT(nn.Module):
     def __init__(
@@ -23,7 +59,9 @@ class MVT(nn.Module):
         add_proprio,
         proprio_dim,
         add_lang,
+        add_lang_t5,
         lang_dim,
+        lang_dim_t5,
         lang_len,
         img_feat_dim,
         feat_dim,
@@ -108,10 +146,16 @@ class MVT(nn.Module):
         self.add_proprio = add_proprio
         self.proprio_dim = proprio_dim
         self.add_lang = add_lang
+        self.add_lang_t5 = add_lang_t5
         if add_lang:
             lang_emb_dim, lang_max_seq_len = lang_dim, lang_len
         else:
             lang_emb_dim, lang_max_seq_len = 0, 0
+
+        if add_lang_t5:
+            lang_emb_dim_t5, lang_max_seq_len = lang_dim_t5, lang_len
+            self.lang_emb_dim_t5 = lang_emb_dim_t5
+
         self.lang_emb_dim = lang_emb_dim
         self.lang_max_seq_len = lang_max_seq_len
 
@@ -188,7 +232,7 @@ class MVT(nn.Module):
             mvt = self.mvt2
 
         with torch.no_grad():
-            with autocast(enabled=False):
+            with autocast(device_type='cuda', enabled=False):
                 if dyn_cam_info is None:
                     dyn_cam_info_itr = (None,) * len(pc)
                 else:
@@ -272,6 +316,7 @@ class MVT(nn.Module):
         img_feat,
         proprio,
         lang_emb,
+        lang_emb_t5,
         img_aug,
         wpt_local,
         rot_x_y,
@@ -322,15 +367,24 @@ class MVT(nn.Module):
             assert bs == bs4
             assert (
                 x4 == self.lang_max_seq_len
-            ), "Does not support lang_emb of shape {lang_emb.shape}"
+            ), f"Does not support lang_emb of shape {lang_emb.shape}"
             assert (
                 x5 == self.lang_emb_dim
-            ), "Does not support lang_emb of shape {lang_emb.shape}"
-        else:
-            assert (lang_emb is None) or (
-                torch.all(lang_emb == 0)
-            ), f"Invalid input for lang={lang}"
+            ), f"Does not support lang_emb of shape {lang_emb.shape}"
+        # else:
+        #     assert (lang_emb is None) or (
+        #         torch.all(lang_emb == 0)
+        #     ), f"Invalid input for lang={lang_emb}"
 
+        if self.add_lang_t5:
+            bs5, x7, x8 = lang_emb_t5.shape
+            assert bs == bs5
+            assert (
+                x7 == self.lang_max_seq_len
+            ), f"Does not support lang_emb_t5 of shape {lang_emb_t5.shape}"
+            assert (
+                x8 == self.lang_emb_dim_t5
+            ), f"Does not support lang_emb_t5 of shape {lang_emb_t5.shape}"
         if not (wpt_local is None):
             bs5, x6 = wpt_local.shape
             assert bs == bs5
@@ -345,9 +399,14 @@ class MVT(nn.Module):
         img_feat,
         proprio=None,
         lang_emb=None,
+        lang_emb_bbox=None,
+        lang_emb_t5=None,
+        lang_emb_t5_bbox=None,
         img_aug=0,
         wpt_local=None,
         rot_x_y=None,
+        visual_prompt_type:list = [],
+        visual_prompt:dict = {},
         **kwargs,
     ):
         """
@@ -356,6 +415,9 @@ class MVT(nn.Module):
             (bs, num_points, img_feat_dim)
         :param proprio: tensor of shape (bs, priprio_dim)
         :param lang_emb: tensor of shape (bs, lang_len, lang_dim)
+        :param lang_emb_bbox: tensor of shape (bs, lang_len, lang_dim)
+        :param lang_emb_t5: tensor of shape (bs, lang_len, lang_dim_t5)
+        :param lang_emb_t5_bbox: tensor of shape (bs, lang_len, lang_dim_t5)
         :param img_aug: (float) magnitude of augmentation in rgb image
         :param wpt_local: gt location of the wpt in 3D, tensor of shape
             (bs, 3)
@@ -366,10 +428,52 @@ class MVT(nn.Module):
             img_feat=img_feat,
             proprio=proprio,
             lang_emb=lang_emb,
+            lang_emb_t5=lang_emb_t5,
             img_aug=img_aug,
             wpt_local=wpt_local,
             rot_x_y=rot_x_y,
         )
+
+        if self.training:
+            wpt_local_stage_one = wpt_local  
+            wpt_local_stage_one = wpt_local_stage_one.clone().detach()
+        else:
+            wpt_local_stage_one = wpt_local
+
+        # visualize bbox and zoom in    
+        if "bbox" in visual_prompt_type:
+            visualize_bbox = True
+        else:
+            visualize_bbox = False
+        if "zoom_in" in visual_prompt_type:
+            zoom_in = True
+        else:
+            zoom_in = False
+
+        if visualize_bbox or zoom_in: # add noise to goal_wpt_local
+            goal_wpt_local = visual_prompt["goal_wpt_local"]
+            if self.training: 
+                goal_wpt_local = mvt_utils.add_uni_noi(
+                    goal_wpt_local.clone().detach(), 2 * self.st_wpt_loc_aug
+                ) # (bs, 3)
+
+        if zoom_in:
+            pc, rev_trans = mvt_utils.trans_pc(
+                pc, loc=goal_wpt_local, sca=self.st_sca // 2.5
+            )
+            goal_wpt_local, goal_wpt_local_rev_trans = mvt_utils.trans_pc(
+                goal_wpt_local, loc=goal_wpt_local, sca=self.st_sca // 2.5
+            )
+            if self.training:
+                wpt_local, wpt_local_rev_trans = mvt_utils.trans_pc(
+                    wpt_local, loc=goal_wpt_local, sca=self.st_sca // 2.5
+                )
+                wpt_local_stage_one = wpt_local  
+                wpt_local_stage_one = wpt_local_stage_one.clone().detach()
+            else:
+                wpt_local_stage_one = wpt_local    
+
+        # render img
         with torch.no_grad():
             if self.training and (self.img_aug_2 != 0):
                 for x in img_feat:
@@ -384,26 +488,48 @@ class MVT(nn.Module):
                 mvt1_or_mvt2=True,
                 dyn_cam_info=None,
             )
+        
+        if visualize_bbox:
+            # img: (bs, num_img, 3, 224, 224)
+            # wpt_local_stage_one: (bs, 3)
+            
+            # get img loc of visual_prompt_wpt
+            visual_prompt_wpt_img_loc = self.renderer.get_pt_loc_on_img(goal_wpt_local.unsqueeze(1), fix_cam=True, dyn_cam_info=None) # (bs, np, num_img, 2)
+            visual_prompt_wpt_img_loc = visual_prompt_wpt_img_loc.squeeze(1).int() # (bs, num_img, 2)
+            # draw red bbox on img
+            img = mvt_utils.draw_red_bbox_on_tensor_batch(img, visual_prompt_wpt_img_loc, box_size=25)
 
-        if self.training:
-            wpt_local_stage_one = wpt_local
-            wpt_local_stage_one = wpt_local_stage_one.clone().detach()
+        # visualize_tensor(img[0,:,3:6], save_path="/data1/cyt/HiMan_VL/tmp/debug_1.png")
+        if visualize_bbox:
+            out = self.mvt1(
+                img=img,
+                proprio=proprio,
+                lang_emb=lang_emb_bbox, # bbox lang_emb
+                lang_emb_t5=lang_emb_t5_bbox, # bbox lang_emb_t5
+                wpt_local=wpt_local_stage_one,
+                rot_x_y=rot_x_y,
+                **kwargs,
+            )
         else:
-            wpt_local_stage_one = wpt_local
-
-        out = self.mvt1(
-            img=img,
-            proprio=proprio,
-            lang_emb=lang_emb,
-            wpt_local=wpt_local_stage_one,
-            rot_x_y=rot_x_y,
-            **kwargs,
-        )
-
+            out = self.mvt1(
+                img=img,
+                proprio=proprio,
+                lang_emb=lang_emb, # original lang_emb
+                lang_emb_t5=lang_emb_t5, # original lang_emb_t5
+                wpt_local=wpt_local_stage_one,
+                rot_x_y=rot_x_y,
+                **kwargs,
+            )
+        out["mvt1_ori_img"]=img.clone().detach()
         if self.stage_two:
             with torch.no_grad():
                 # adding then noisy location for training
                 if self.training:
+                    if zoom_in:
+                        pc = rev_trans(pc)
+                        goal_wpt_local = goal_wpt_local_rev_trans(goal_wpt_local)
+                        wpt_local = goal_wpt_local_rev_trans(wpt_local_stage_one)
+
                     # noise is added so that the wpt_local2 is not exactly at
                     # the center of the pc
                     wpt_local_stage_one_noisy = mvt_utils.add_uni_noi(
@@ -428,6 +554,13 @@ class MVT(nn.Module):
                         out, y_q=None, mvt1_or_mvt2=True,
                         dyn_cam_info=None,
                     )
+
+                    if zoom_in:
+                        # reverse the zoom in
+                        pc = rev_trans(pc)
+                        goal_wpt_local = goal_wpt_local_rev_trans(goal_wpt_local)
+                        wpt_local = goal_wpt_local_rev_trans(wpt_local)
+
                     pc, rev_trans = mvt_utils.trans_pc(
                         pc, loc=wpt_local, sca=self.st_sca
                     )
@@ -444,11 +577,12 @@ class MVT(nn.Module):
                     mvt1_or_mvt2=False,
                     dyn_cam_info=None,
                 )
-
+            # visualize_tensor(img[0,:,3:6], save_path="/data1/cyt/HiMan_VL/tmp/debug_2.png")
             out_mvt2 = self.mvt2(
                 img=img,
                 proprio=proprio,
-                lang_emb=lang_emb,
+                lang_emb=lang_emb, # original lang_emb
+                lang_emb_t5=lang_emb_t5, # original lang_emb_t5
                 wpt_local=wpt_local2,
                 rot_x_y=rot_x_y,
                 **kwargs,
@@ -457,6 +591,7 @@ class MVT(nn.Module):
             out["wpt_local1"] = wpt_local_stage_one_noisy
             out["rev_trans"] = rev_trans
             out["mvt2"] = out_mvt2
+            out["mvt2_ori_img"]=img.clone().detach()
 
         return out
 

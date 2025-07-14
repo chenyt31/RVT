@@ -33,7 +33,9 @@ class MVT(nn.Module):
         add_proprio,
         proprio_dim,
         add_lang,
+        add_lang_t5,
         lang_dim,
+        lang_dim_t5,
         lang_len,
         img_feat_dim,
         feat_dim,
@@ -131,8 +133,10 @@ class MVT(nn.Module):
         self.add_proprio = add_proprio
         self.proprio_dim = proprio_dim
         self.add_lang = add_lang
+        self.add_lang_t5 = add_lang_t5
         self.lang_dim = lang_dim
         self.lang_len = lang_len
+        self.lang_dim_t5 = lang_dim_t5
         self.im_channels = im_channels
         self.img_patch_size = img_patch_size
         self.final_dim = final_dim
@@ -161,7 +165,7 @@ class MVT(nn.Module):
                 " prediction"
             )
 
-        print(f"MVT Vars: {vars(self)}")
+        # print(f"MVT Vars: {vars(self)}")
 
         assert not renderer is None
         self.renderer = renderer
@@ -181,6 +185,9 @@ class MVT(nn.Module):
             lang_emb_dim, lang_max_seq_len = lang_dim, lang_len
         else:
             lang_emb_dim, lang_max_seq_len = 0, 0
+        if add_lang_t5:
+            lang_emb_dim_t5, lang_max_seq_len = lang_dim_t5, lang_len
+            self.lang_emb_dim_t5 = lang_emb_dim_t5
         self.lang_emb_dim = lang_emb_dim
         self.lang_max_seq_len = lang_max_seq_len
 
@@ -255,6 +262,13 @@ class MVT(nn.Module):
         if self.add_lang:
             self.lang_preprocess = DenseBlock(
                 lang_emb_dim,
+                self.im_channels * 2,
+                norm="group",
+                activation=activation,
+            )
+        if self.add_lang_t5:
+            self.lang_preprocess_t5 = DenseBlock(
+                lang_emb_dim_t5,
                 self.im_channels * 2,
                 norm="group",
                 activation=activation,
@@ -413,6 +427,7 @@ class MVT(nn.Module):
         img,
         proprio=None,
         lang_emb=None,
+        lang_emb_t5=None,
         wpt_local=None,
         rot_x_y=None,
         **kwargs,
@@ -421,6 +436,7 @@ class MVT(nn.Module):
         :param img: tensor of shape (bs, num_img, img_feat_dim, h, w)
         :param proprio: tensor of shape (bs, priprio_dim)
         :param lang_emb: tensor of shape (bs, lang_len, lang_dim)
+        :param lang_emb_t5: tensor of shape (bs, lang_len, lang_dim_t5)
         :param img_aug: (float) magnitude of augmentation in rgb image
         :param rot_x_y: (bs, 2)
         """
@@ -482,6 +498,15 @@ class MVT(nn.Module):
             num_lang_tok = l.shape[1]
             ins = torch.cat((l, ins), dim=1)  # [B, num_img * np * np + 77, 128]
 
+        num_lang_tok_t5 = 0
+        if self.add_lang_t5:
+            l5 = self.lang_preprocess_t5(
+                lang_emb_t5.view(bs * self.lang_max_seq_len, self.lang_emb_dim_t5)
+            )
+            l5 = l5.view(bs, self.lang_max_seq_len, -1)
+            num_lang_tok_t5 = l5.shape[1]
+            ins = torch.cat((l5, ins), dim=1)  # [B, num_img * np * np + 77, 128]
+
         # add learable pos encoding
         if not self.pe_fix:
             ins = ins + self.pos_encoding
@@ -494,7 +519,7 @@ class MVT(nn.Module):
                 x = self_ff(x) + x
 
         elif self.self_cross_ver == 1:
-            lx, imgx = x[:, :num_lang_tok], x[:, num_lang_tok:]
+            lx, imgx = x[:, :num_lang_tok+num_lang_tok_t5], x[:, num_lang_tok+num_lang_tok_t5:]
 
             # within image self attention
             imgx = imgx.reshape(bs * num_img, num_pat_img * num_pat_img, -1)
@@ -516,6 +541,9 @@ class MVT(nn.Module):
         if self.add_lang:
             # throwing away the language embeddings
             x = x[:, num_lang_tok:]
+        if self.add_lang_t5:
+            # throwing away the language embeddings
+            x = x[:, num_lang_tok_t5:]
         x = self.fc_aft_attn(x)
 
         # reshape back to orginal size

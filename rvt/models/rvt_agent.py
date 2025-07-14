@@ -2,6 +2,7 @@
 #
 # Licensed under the NVIDIA Source Code License [see LICENSE for details].
 
+import os
 import pprint
 
 import clip
@@ -12,7 +13,7 @@ import torch.nn as nn
 import bitsandbytes as bnb
 
 from scipy.spatial.transform import Rotation
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.nn.parallel.distributed import DistributedDataParallel
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -21,12 +22,12 @@ import rvt.mvt.utils as mvt_utils
 import rvt.utils.rvt_utils as rvt_utils
 import peract_colab.arm.utils as arm_utils
 
-from rvt.mvt.augmentation import apply_se3_aug_con, aug_utils
+from rvt.mvt.augmentation import apply_se3_aug_con, apply_se3_aug_con_with_sub_goal, aug_utils
 from peract_colab.arm.optim.lamb import Lamb
 from yarr.agents.agent import ActResult
 from rvt.utils.dataset import _clip_encode_text
 from rvt.utils.lr_sched_utils import GradualWarmupScheduler
-
+from rvt.utils.t5_encoder import T5Embedder
 
 def eval_con(gt, pred):
     assert gt.shape == pred.shape, print(f"{gt.shape} {pred.shape}")
@@ -273,6 +274,7 @@ class RVTAgent:
         num_rotation_classes: int,
         stage_two: bool,
         add_lang: bool,
+        add_lang_t5: bool,
         amp: bool,
         bnb: bool,
         move_pc_in_bound: bool,
@@ -296,6 +298,7 @@ class RVTAgent:
         rot_ver: int = 0,
         rot_x_y_aug: int = 2,
         log_dir="",
+        t5_embedder:T5Embedder=None,
     ):
         """
         :param gt_hm_sigma: the std of the groundtruth hm, currently for for
@@ -333,6 +336,7 @@ class RVTAgent:
         self.bnb = bnb
         self.stage_two = stage_two
         self.add_lang = add_lang
+        self.add_lang_t5 = add_lang_t5
         self.log_dir = log_dir
         self.warmup_steps = warmup_steps
         self.lr_cos_dec = lr_cos_dec
@@ -342,7 +346,7 @@ class RVTAgent:
         self.move_pc_in_bound = move_pc_in_bound
         self.rot_ver = rot_ver
         self.rot_x_y_aug = rot_x_y_aug
-
+        self.t5_embedder = t5_embedder
         self._cross_entropy_loss = nn.CrossEntropyLoss(reduction="none")
         if isinstance(self._network, DistributedDataParallel):
             self._net_mod = self._network.module
@@ -359,7 +363,7 @@ class RVTAgent:
 
         if self._optimizer_type == "lamb":
             if self.bnb:
-                print("Using 8-Bit Optimizer")
+                # print("Using 8-Bit Optimizer")
                 self._optimizer = bnb.optim.LAMB(
                     self._network.parameters(),
                     lr=self._lr,
@@ -528,11 +532,16 @@ class RVTAgent:
         backprop: bool = True,
         eval_log: bool = False,
         reset_log: bool = False,
+        visual_prompt_type=[],
     ) -> dict:
         assert replay_sample["rot_grip_action_indicies"].shape[1:] == (1, 4)
         assert replay_sample["ignore_collisions"].shape[1:] == (1, 1)
         assert replay_sample["gripper_pose"].shape[1:] == (1, 7)
         assert replay_sample["lang_goal_embs"].shape[1:] == (1, 77, 512)
+        assert replay_sample["lang_goal_embs_bbox"].shape[1:] == (1, 77, 512)
+        if self.add_lang_t5:
+            assert replay_sample["lang_goal_embs_t5"].shape[1:] == (1, 77, 4096)
+            assert replay_sample["lang_goal_embs_t5_bbox"].shape[1:] == (1, 77, 4096)
         assert replay_sample["low_dim_state"].shape[1:] == (
             1,
             self._net_mod.proprio_dim,
@@ -551,7 +560,21 @@ class RVTAgent:
         action_rot = action_gripper_pose[:, 3:7]  # (b, 4)
         action_grip = action_rot_grip[:, -1]  # (b,)
         lang_goal_embs = replay_sample["lang_goal_embs"][:, -1].float()
+        lang_goal_embs_bbox = replay_sample["lang_goal_embs_bbox"][:, -1].float()
+        lang_goal_embs_t5 = replay_sample["lang_goal_embs_t5"][:, -1].float()
+        lang_goal_embs_t5_bbox = replay_sample["lang_goal_embs_t5_bbox"][:, -1].float()
         tasks = replay_sample["tasks"]
+
+        if "bbox" in visual_prompt_type or "zoom_in" in visual_prompt_type:
+            use_sub_goal = True
+            sub_goal_action_gripper_pose = replay_sample["sub_goal_gripper_pose"][:, -1]  # (b, 7)
+            sub_goal_action_trans_con = sub_goal_action_gripper_pose[:, 0:3]  # (b, 3)
+            sub_goal_action_rot = sub_goal_action_gripper_pose[:, 3:7]  # (b, 4)
+        else:
+            use_sub_goal = False
+            sub_goal_action_gripper_pose = action_gripper_pose.clone().detach()
+            sub_goal_action_trans_con = action_trans_con.clone().detach()
+            sub_goal_action_rot = action_rot.clone().detach()
 
         proprio = arm_utils.stack_on_channel(replay_sample["low_dim_state"])  # (b, 4)
         return_out = {}
@@ -565,15 +588,18 @@ class RVTAgent:
             )
 
             if self._transform_augmentation and backprop:
-                action_trans_con, action_rot, pc = apply_se3_aug_con(
+                action_trans_con, action_rot, sub_goal_action_trans_con, sub_goal_action_rot, pc = apply_se3_aug_con_with_sub_goal(
                     pcd=pc,
                     action_gripper_pose=action_gripper_pose,
+                    sub_goal_action_gripper_pose=sub_goal_action_gripper_pose,
                     bounds=torch.tensor(self.scene_bounds),
-                    trans_aug_range=torch.tensor(self._transform_augmentation_xyz),
+                    trans_aug_range=self._transform_augmentation_xyz.clone().detach(),
                     rot_aug_range=torch.tensor(self._transform_augmentation_rpy),
                 )
                 action_trans_con = torch.tensor(action_trans_con).to(pc.device)
                 action_rot = torch.tensor(action_rot).to(pc.device)
+                sub_goal_action_trans_con = torch.tensor(sub_goal_action_trans_con).to(pc.device)
+                sub_goal_action_rot = torch.tensor(sub_goal_action_rot).to(pc.device)
 
             # TODO: vectorize
             action_rot = action_rot.cpu().numpy()
@@ -587,6 +613,8 @@ class RVTAgent:
                 pc, img_feat, self.scene_bounds, no_op=not self.move_pc_in_bound
             )
             wpt = [x[:3] for x in action_trans_con]
+            if use_sub_goal:
+                sub_goal_wpt = [x[:3] for x in sub_goal_action_trans_con]
 
             wpt_local = []
             rev_trans = []
@@ -601,6 +629,20 @@ class RVTAgent:
                 rev_trans.append(b)
 
             wpt_local = torch.cat(wpt_local, axis=0)
+
+            sub_goal_wpt_local = []
+            if use_sub_goal:
+                sub_goal_rev_trans = []
+                for _pc, _sub_goal_wpt in zip(pc, sub_goal_wpt):
+                    a, b = mvt_utils.place_pc_in_cube(
+                        _pc,
+                        _sub_goal_wpt,
+                        with_mean_or_bounds=self._place_with_mean,
+                        scene_bounds=None if self._place_with_mean else self.scene_bounds,
+                    )
+                    sub_goal_wpt_local.append(a.unsqueeze(0))
+                    sub_goal_rev_trans.append(b)
+                sub_goal_wpt_local = torch.cat(sub_goal_wpt_local, axis=0)
 
             # TODO: Vectorize
             pc = [
@@ -623,7 +665,7 @@ class RVTAgent:
 
             dyn_cam_info = None
 
-        with autocast(enabled=self.amp):
+        with autocast(device_type='cuda', enabled=self.amp):
             (
                 action_rot_x_one_hot,
                 action_rot_y_one_hot,
@@ -654,9 +696,14 @@ class RVTAgent:
                 img_feat=img_feat,
                 proprio=proprio,
                 lang_emb=lang_goal_embs,
+                lang_emb_bbox=lang_goal_embs_bbox,
+                lang_emb_t5=lang_goal_embs_t5,
+                lang_emb_t5_bbox=lang_goal_embs_t5_bbox,
                 img_aug=img_aug,
                 wpt_local=wpt_local if self._network.training else None,
                 rot_x_y=rot_x_y if self.rot_ver == 1 else None,
+                visual_prompt_type=visual_prompt_type,
+                visual_prompt={"goal_wpt_local": sub_goal_wpt_local},
             )
 
             q_trans, rot_q, grip_q, collision_q, y_q, pts = self.get_q(
@@ -669,7 +716,7 @@ class RVTAgent:
 
         loss_log = {}
         if backprop:
-            with autocast(enabled=self.amp):
+            with autocast(device_type='cuda', enabled=self.amp):
                 # cross-entropy loss
                 trans_loss = self._cross_entropy_loss(q_trans, action_trans).mean()
                 rot_loss_x = rot_loss_y = rot_loss_z = 0.0
@@ -770,18 +817,31 @@ class RVTAgent:
 
     @torch.no_grad()
     def act(
-        self, step: int, observation: dict, deterministic=True, pred_distri=False
+        self, step: int, observation: dict, deterministic=True, pred_distri=False,
+        visual_prompt_type=[],
+        visualize=False,visualize_save_dir="",
     ) -> ActResult:
         if self.add_lang:
             lang_goal_tokens = observation.get("lang_goal_tokens", None).long()
             _, lang_goal_embs = _clip_encode_text(self.clip_model, lang_goal_tokens[0])
             lang_goal_embs = lang_goal_embs.float()
+
+            lang_goal_tokens_bbox = observation.get("lang_goal_tokens_bbox", None).long()
+            _, lang_goal_embs_bbox = _clip_encode_text(self.clip_model, lang_goal_tokens_bbox[0])
+            lang_goal_embs_bbox = lang_goal_embs_bbox.float()
         else:
-            lang_goal_embs = (
-                torch.zeros(observation["lang_goal_embs"].shape)
-                .float()
-                .to(self._device)
-            )
+            lang_goal_embs = None
+            lang_goal_embs_bbox = None
+        if self.add_lang_t5:
+            lang_goal_embs_t5 = self.t5_embedder.get_text_embeddings(observation["lang_goal"])[0].float()
+            lang_goal_embs_t5_bbox = self.t5_embedder.get_text_embeddings(observation["lang_goal_bbox"])[0].float()
+        else:
+            lang_goal_embs_t5 = None
+            lang_goal_embs_t5_bbox = None
+        if "bbox" in visual_prompt_type or "zoom_in" in visual_prompt_type:
+            sub_goal_wpt = observation["sub_goal_wpt"]
+        else:
+            sub_goal_wpt = None
 
         proprio = arm_utils.stack_on_channel(observation["low_dim_state"])
 
@@ -794,7 +854,22 @@ class RVTAgent:
         pc, img_feat = rvt_utils.move_pc_in_bound(
             pc, img_feat, self.scene_bounds, no_op=not self.move_pc_in_bound
         )
+        sub_goal_wpt_local = []
+        if sub_goal_wpt is not None:
+            sub_goal_rev_trans = []
+            for _pc, _sub_goal_wpt in zip(pc, sub_goal_wpt):
+                a, b = mvt_utils.place_pc_in_cube(
+                    _pc,
+                    _sub_goal_wpt,
+                    with_mean_or_bounds=self._place_with_mean,
+                    scene_bounds=None if self._place_with_mean else self.scene_bounds,
+                )
+                sub_goal_wpt_local.append(a.unsqueeze(0))
+                sub_goal_rev_trans.append(b)
+            sub_goal_wpt_local = torch.cat(sub_goal_wpt_local, axis=0)
 
+        pc_ori = pc[0].clone()
+        img_feat_ori=img_feat[0].clone()
         # TODO: Vectorize
         pc_new = []
         rev_trans = []
@@ -818,11 +893,22 @@ class RVTAgent:
             img_feat=img_feat,
             proprio=proprio,
             lang_emb=lang_goal_embs,
+            lang_emb_bbox=lang_goal_embs_bbox,
+            lang_emb_t5=lang_goal_embs_t5,
+            lang_emb_t5_bbox=lang_goal_embs_t5_bbox,
             img_aug=0,  # no img augmentation while acting
+            visual_prompt_type=visual_prompt_type,
+            visual_prompt={"goal_wpt_local": sub_goal_wpt_local},
         )
-        _, rot_q, grip_q, collision_q, y_q, _ = self.get_q(
-            out, dims=(bs, nc, h, w), only_pred=True, get_q_trans=False
-        )
+
+        if visualize:
+            q_trans, rot_q, grip_q, collision_q, y_q, _ = self.get_q(
+                out, dims=(bs, nc, h, w), only_pred=True, get_q_trans=True
+            )
+        else:
+            _, rot_q, grip_q, collision_q, y_q, _ = self.get_q(
+                out, dims=(bs, nc, h, w), only_pred=True, get_q_trans=False
+            )            
         pred_wpt, pred_rot_quat, pred_grip, pred_coll = self.get_pred(
             out, rot_q, grip_q, collision_q, y_q, rev_trans, dyn_cam_info
         )
@@ -835,26 +921,28 @@ class RVTAgent:
                 pred_coll[0].cpu().numpy(),
             )
         )
-        if pred_distri:
-            x_distri = rot_grip_q[
-                0,
-                0 * self._num_rotation_classes : 1 * self._num_rotation_classes,
-            ]
-            y_distri = rot_grip_q[
-                0,
-                1 * self._num_rotation_classes : 2 * self._num_rotation_classes,
-            ]
-            z_distri = rot_grip_q[
-                0,
-                2 * self._num_rotation_classes : 3 * self._num_rotation_classes,
-            ]
-            return ActResult(continuous_action), (
-                x_distri.cpu().numpy(),
-                y_distri.cpu().numpy(),
-                z_distri.cpu().numpy(),
-            )
-        else:
-            return ActResult(continuous_action)
+        
+        if visualize:
+            print("Visualizing")
+            save_dir=visualize_save_dir
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
+            save_dir=os.path.join(save_dir,f"step{str(step)}")
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
+
+            mvt1_img=out["mvt1_ori_img"][0,:,3:6]
+            mvt2_img=out["mvt2_ori_img"][0,:,3:6]
+            q_trans_1=q_trans[0,:,:3].clone().view(224,224,3)
+            q_trans_2=q_trans[0,:,3:6].clone().view(224,224,3)
+            q_trans_1=rvt_utils.apply_channel_wise_softmax(q_trans_1)*100
+            q_trans_2=rvt_utils.apply_channel_wise_softmax(q_trans_2)*100
+            rvt_utils.visualize_images(mvt1_img,q_trans_1,save_dir=os.path.join(save_dir,"mvt1"))
+            rvt_utils.visualize_images(mvt2_img,q_trans_2,save_dir=os.path.join(save_dir,"mvt2"))
+            # rvt_utils.save_point_cloud_with_color(os.path.join(save_dir,"point_cloud.ply"), pc_ori.cpu().numpy(), img_feat_ori.cpu().numpy(), pred_wpt[0].cpu().numpy())
+
+
+        return ActResult(continuous_action)
 
     def get_pred(
         self,

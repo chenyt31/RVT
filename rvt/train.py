@@ -11,7 +11,7 @@ import argparse
 
 from collections import defaultdict
 from contextlib import redirect_stdout
-
+import wandb
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
@@ -34,19 +34,27 @@ from rvt.utils.rvt_utils import (
     get_num_feat,
     load_agent,
     RLBENCH_TASKS,
+    COLOSSEUM_TASKS
 )
 from rvt.utils.peract_utils import (
     CAMERAS,
     SCENE_BOUNDS,
     IMAGE_SIZE,
+    TRAIN_REPLAY_STORAGE_DIR,
     DATA_FOLDER,
+    NUM_TRAIN
 )
 
 
 # new train takes the dataset as input
-def train(agent, dataset, training_iterations, rank=0):
+def train(agent, dataset, training_iterations, epoch, rank=0, zoom_in=False, visualize_bbox=False):
     agent.train()
     log = defaultdict(list)
+    visual_prompt_type = []
+    if zoom_in:
+        visual_prompt_type.append("zoom_in")
+    if visualize_bbox:
+        visual_prompt_type.append("bbox")
 
     data_iter = iter(dataset)
     iter_command = range(training_iterations)
@@ -72,9 +80,16 @@ def train(agent, dataset, training_iterations, rank=0):
                 "backprop": True,
                 "reset_log": (iteration == 0),
                 "eval_log": False,
+                "visual_prompt_type": visual_prompt_type,
             }
         )
-        agent.update(**update_args)
+        out = agent.update(**update_args)
+        if rank == 0:
+            step=epoch*training_iterations+iteration
+            wandb.log(
+                    out,
+                    step=step,
+                )
 
     if rank == 0:
         log = print_loss_log(agent)
@@ -106,7 +121,7 @@ def save_agent(agent, path, epoch):
 def get_tasks(exp_cfg):
     parsed_tasks = exp_cfg.tasks.split(",")
     if parsed_tasks[0] == "all":
-        tasks = RLBENCH_TASKS
+        tasks = COLOSSEUM_TASKS
     else:
         tasks = parsed_tasks
     return tasks
@@ -168,12 +183,11 @@ def experiment(rank, cmd_args, devices, port):
 
     # Things to change
     BATCH_SIZE_TRAIN = exp_cfg.bs
-    NUM_TRAIN = 100
+    # NUM_TRAIN = 100
     # to match peract, iterations per epoch
     TRAINING_ITERATIONS = int(exp_cfg.train_iter // (exp_cfg.bs * len(devices)))
+    # TRAINING_ITERATIONS = 20
     EPOCHS = exp_cfg.epochs
-    TRAIN_REPLAY_STORAGE_DIR = "replay/replay_train"
-    TEST_REPLAY_STORAGE_DIR = "replay/replay_val"
     log_dir = get_logdir(cmd_args, exp_cfg)
     tasks = get_tasks(exp_cfg)
     print("Training on {} tasks: {}".format(len(tasks), tasks))
@@ -225,7 +239,8 @@ def experiment(rank, cmd_args, devices, port):
         agent = rvt_agent.RVTAgent(
             network=rvt,
             image_resolution=[IMAGE_SIZE, IMAGE_SIZE],
-            add_lang=mvt_cfg.add_lang,
+            add_lang=cmd_args.add_lang,
+            add_lang_t5=cmd_args.add_lang_t5,
             stage_two=mvt_cfg.stage_two,
             rot_ver=mvt_cfg.rot_ver,
             scene_bounds=SCENE_BOUNDS,
@@ -260,6 +275,10 @@ def experiment(rank, cmd_args, devices, port):
         exp_cfg.exp_id = temp2
         exp_cfg.freeze()
         tb = TensorboardManager(log_dir)
+    # Initialize Logging =>> W&B
+    if dist.get_rank() == 0:
+        wandb.login(key="")
+        wandb.init(entity="978396637", project="HiMan_VL", name=os.path.dirname(log_dir))
 
     print("Start training ...", flush=True)
     i = start_epoch
@@ -268,7 +287,7 @@ def experiment(rank, cmd_args, devices, port):
             break
 
         print(f"Rank [{rank}], Epoch [{i}]: Training on train dataset")
-        out = train(agent, train_dataset, TRAINING_ITERATIONS, rank)
+        out = train(agent, train_dataset, TRAINING_ITERATIONS, i, rank, zoom_in=cmd_args.zoom_in,visualize_bbox=cmd_args.visualize_bbox)
 
         if rank == 0:
             tb.update("train", i, out)
@@ -298,6 +317,11 @@ if __name__ == "__main__":
 
     parser.add_argument("--log-dir", type=str, default="runs")
     parser.add_argument("--with-eval", action="store_true", default=False)
+
+    parser.add_argument("--visualize_bbox", action="store_true", default=False)
+    parser.add_argument("--zoom_in", action="store_true", default=False)
+    parser.add_argument("--add_lang", action="store_true", default=False)
+    parser.add_argument("--add_lang_t5", action="store_true", default=False)
 
     cmd_args = parser.parse_args()
     del (

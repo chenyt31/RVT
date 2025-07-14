@@ -89,8 +89,8 @@ rlbench:
   - right_shoulder
   - wrist
   camera_resolution:
-  - 128
-  - 128
+  - 256
+  - 256
   scene_bounds:
   - -0.3
   - -0.5
