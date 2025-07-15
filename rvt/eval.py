@@ -539,7 +539,7 @@ def _eval(args):
                 continue
 
         if args.agent_type == 'remote':
-            agent = WebsocketClientPolicyAgent(host="114.212.189.99", port=8000)
+            agent = WebsocketClientPolicyAgent(host="114.212.189.99", port=args.port)
             agent_eval_log_dir = os.path.join(
                 args.eval_log_dir, os.path.basename(model_path).split(".")[0]
             )

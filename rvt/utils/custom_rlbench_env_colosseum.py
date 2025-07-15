@@ -338,6 +338,7 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
             
             self._previous_obs_dict = obs
         except (IKError, ConfigurationPathError, InvalidActionError) as e:
+            print(e)
             terminal = True
             reward = 0.0
 
@@ -352,7 +353,10 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
 
         summaries = []
         self._i += 1
-        obs = self.extract_obs(obs)
+        try:
+            obs = self.extract_obs(obs)
+        except:
+            pass
         if ((terminal or self._i == self._episode_length) and
                 self._record_current_episode):
             self._append_final_frame(success)

@@ -3,6 +3,8 @@ export model_folder=$2  # PATH_TO_MODEL_FOLDER
 export visualize_bbox=$3
 export lang_type=$4
 export agent_type=$5
+export device=$6
+export port=$7
 export DEMO_PATH_ROOT=/data1/cyt/HiMan_data/test
 export TF_CPP_MIN_LOG_LEVEL=3
 
@@ -24,14 +26,15 @@ for root_task in \
                 --tasks $task_name \
                 --eval-episodes 1 \
                 --log-name epoch_${epoch} \
-                --device 1 \
+                --device $device \
                 --headless \
                 --model-name model_${epoch}.pth \
                 --colosseum \
                 --save-video \
                 --visualize_bbox \
                 --lang_type $lang_type \
-                --agent_type $agent_type
+                --agent_type $agent_type \
+                --port $port
         else
             uv run debugpy --listen 5678 --wait-for-client eval.py \
                     --model-folder $model_folder \
@@ -39,13 +42,14 @@ for root_task in \
                     --tasks $task_name \
                     --eval-episodes 1 \
                     --log-name epoch_${epoch} \
-                    --device 0 \
+                    --device $device \
                     --headless \
                     --model-name model_${epoch}.pth \
                     --colosseum \
                     --save-video \
                     --lang_type $lang_type \
-                    --agent_type $agent_type
+                    --agent_type $agent_type \
+                    --port $port
         fi
     done
 

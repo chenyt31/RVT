@@ -316,6 +316,7 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--use-input-place-with-mean", action="store_true", default=False)
     parser.add_argument("--lang-type", type=str, default="clip")
+    parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
 
     model_paths = []
@@ -334,4 +335,4 @@ if __name__ == "__main__":
     if isinstance(agent, rvt_agent.RVTAgent):
         agent.load_clip()
 
-    WebsocketPolicyServer(agent, host="114.212.189.99", port=8000).serve_forever()
+    WebsocketPolicyServer(agent, host="114.212.189.99", port=args.port).serve_forever()
