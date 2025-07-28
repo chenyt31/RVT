@@ -328,6 +328,21 @@ def _clip_encode_text(clip_model, text):
 
     return x, emb
 
+import bisect
+def find_first_greater_index(episode_keypoints, sample_frame):
+    index = bisect.bisect_right(episode_keypoints, sample_frame)
+    return index if index < len(episode_keypoints) else -1
+
+def get_current_timestep(episode_keypoints, subgoal_keypoints, sample_frame):
+    next_keypoint_idx = find_first_greater_index(episode_keypoints, sample_frame)
+    next_subgoal_keypoints_idx = find_first_greater_index(subgoal_keypoints, sample_frame)
+
+    if next_subgoal_keypoints_idx == 0:
+        start_idx = 0
+    elif next_subgoal_keypoints_idx >= 1:
+        start_idx = episode_keypoints.index(subgoal_keypoints[next_subgoal_keypoints_idx-1]) + 1
+
+    return next_keypoint_idx - start_idx
 
 # add individual data points to a replay
 def _add_keypoints_to_replay(
@@ -339,6 +354,7 @@ def _add_keypoints_to_replay(
     inital_obs: Observation,
     demo: Demo,
     episode_keypoints: List[int],
+    sub_goal_keypoints: List[int],
     cameras: List[str],
     rlbench_scene_bounds: List[float],
     voxel_sizes: List[int],
@@ -393,30 +409,32 @@ def _add_keypoints_to_replay(
 
         terminal = k == len(episode_keypoints) - 1
         reward = float(terminal) * 1.0 if terminal else 0
+        timestep = get_current_timestep(episode_keypoints, sub_goal_keypoints, sample_frame)
 
         obs_dict = extract_obs(
             obs,
             CAMERAS,
-            t=k - next_keypoint_idx,
-            prev_action=prev_action,
-            episode_length=25,
+            t=timestep,
+            # t=k - next_keypoint_idx,
+            # prev_action=prev_action,
+            episode_length=15,
         )
-        print('description', description)
-        print("Focus on red bounding box, " + description)
+        # print('description', description)
+        # print("Focus on red bounding box, " + description)
         tokens = clip.tokenize([description, "Focus on red bounding box, " + description]).numpy()
         token_tensor = torch.from_numpy(tokens).to(device)
         with torch.no_grad():
             lang_feats, lang_embs = _clip_encode_text(clip_model, token_tensor)
         obs_dict["lang_goal_embs"] = lang_embs[0].float().detach().cpu().numpy()
         obs_dict["lang_goal_embs_bbox"] = lang_embs[1].float().detach().cpu().numpy()
-        print('lang_embs[0].shape', lang_embs[0].shape)
-        print('lang_embs[1].shape', lang_embs[1].shape)
+        # print('lang_embs[0].shape', lang_embs[0].shape)
+        # print('lang_embs[1].shape', lang_embs[1].shape)
         if t5_embedder is not None:
             embeddings, _ = t5_embedder.get_text_embeddings([description, "Focus on red bounding box, " + description])
             obs_dict["lang_goal_embs_t5"] = embeddings[0].float().detach().cpu().numpy()
             obs_dict["lang_goal_embs_t5_bbox"] = embeddings[1].float().detach().cpu().numpy()
-            print('embeddings[0].shape', embeddings[0].shape)
-            print('embeddings[1].shape', embeddings[1].shape)
+            # print('embeddings[0].shape', embeddings[0].shape)
+            # print('embeddings[1].shape', embeddings[1].shape)
 
         prev_action = np.copy(action)
 
@@ -459,24 +477,25 @@ def _add_keypoints_to_replay(
         obs = obs_tp1
         sample_frame = keypoint
 
+        break
     # final step
-    obs_dict_tp1 = extract_obs(
-        obs_tp1,
-        CAMERAS,
-        t=k + 1 - next_keypoint_idx,
-        prev_action=prev_action,
-        episode_length=25,
-    )
-    obs_dict_tp1["lang_goal_embs"] = lang_embs[0].float().detach().cpu().numpy()
-    obs_dict_tp1["lang_goal_embs_bbox"] = lang_embs[1].float().detach().cpu().numpy()
-    if t5_embedder is not None:
-        embeddings, _ = t5_embedder.get_text_embeddings([description, "Focus on red bounding box, " + description])
-        obs_dict_tp1["lang_goal_embs_t5"] = embeddings[0].float().detach().cpu().numpy()
-        obs_dict_tp1["lang_goal_embs_t5_bbox"] = embeddings[1].float().detach().cpu().numpy()
+    # obs_dict_tp1 = extract_obs(
+    #     obs_tp1,
+    #     CAMERAS,
+    #     t=k + 1 - next_keypoint_idx,
+    #     prev_action=prev_action,
+    #     episode_length=25,
+    # )
+    # obs_dict_tp1["lang_goal_embs"] = lang_embs[0].float().detach().cpu().numpy()
+    # obs_dict_tp1["lang_goal_embs_bbox"] = lang_embs[1].float().detach().cpu().numpy()
+    # if t5_embedder is not None:
+    #     embeddings, _ = t5_embedder.get_text_embeddings([description, "Focus on red bounding box, " + description])
+    #     obs_dict_tp1["lang_goal_embs_t5"] = embeddings[0].float().detach().cpu().numpy()
+    #     obs_dict_tp1["lang_goal_embs_t5_bbox"] = embeddings[1].float().detach().cpu().numpy()
 
-    obs_dict_tp1.pop("wrist_world_to_cam", None)
-    obs_dict_tp1.update(final_obs)
-    replay.add_final(task, task_replay_storage_folder, **obs_dict_tp1)
+    # obs_dict_tp1.pop("wrist_world_to_cam", None)
+    # obs_dict_tp1.update(final_obs)
+    # replay.add_final(task, task_replay_storage_folder, **obs_dict_tp1)
 
 
 def fill_replay(
@@ -519,8 +538,12 @@ def fill_replay(
     else:
         print("Filling replay ...")
         for d_idx in range(start_idx, start_idx + num_demos):
-            print("Filling demo %d" % d_idx)
-            demo = get_stored_demo(data_path=data_path, index=d_idx)
+            try:
+                demo = get_stored_demo(data_path=data_path, index=d_idx)
+                print("Filling demo %d in %s" % (d_idx, data_path))
+            except:
+                print(f"Demo {d_idx} not found in {data_path}")
+                continue
 
             # get language goal from disk
             varation_descs_pkl_file = os.path.join(
@@ -528,6 +551,10 @@ def fill_replay(
             )
             with open(varation_descs_pkl_file, "rb") as f:
                 descs = pickle.load(f)
+                try:
+                    descs = descs['oracle_half']
+                except:
+                    pass
 
             # extract keypoints
             episode_keypoints = keypoint_discovery(demo)
@@ -535,6 +562,7 @@ def fill_replay(
                 episode_keypoints = episode_keypoints[1:]
             sub_goal_keypoints = keypoint_discovery(demo, task_str=task)
             sub_goal_episode_keypoints = []
+            sub_goal_episode_keypoints_index = []
             # Populate goal action list for each keypoint with the nearest future goal
             goal_index = 0
             for i in range(len(episode_keypoints)):
@@ -543,9 +571,11 @@ def fill_replay(
                 if goal_index == len(sub_goal_keypoints):
                     break
                 sub_goal_episode_keypoints.append(sub_goal_keypoints[goal_index])
+                sub_goal_episode_keypoints_index.append(goal_index)
             # sub_goal_episode_keypoints.append(sub_goal_keypoints[-1])
             print('episode_keypoints', episode_keypoints)
             print('sub_goal_episode_keypoints', sub_goal_episode_keypoints)
+            print('sub_goal_episode_keypoints_index', sub_goal_episode_keypoints_index)
             next_keypoint_idx = 0
             for i in range(len(demo) - 1):
                 if not demo_augmentation and i > 0:
@@ -554,7 +584,7 @@ def fill_replay(
                     continue
 
                 obs = demo[i]
-                desc = descs[0]
+                
                 # if our starting point is past one of the keypoints, then remove it
                 while (
                     next_keypoint_idx < len(episode_keypoints)
@@ -563,6 +593,12 @@ def fill_replay(
                     next_keypoint_idx += 1
                 if next_keypoint_idx == len(episode_keypoints):
                     break
+                try:
+                    desc = descs[0].split('\n')[sub_goal_episode_keypoints_index[next_keypoint_idx]]
+                    print('desc:', desc)
+                except:
+                    print('desc not found for demo %d in %s' % (d_idx, data_path))
+                    continue
                 _add_keypoints_to_replay(
                     replay,
                     task,
@@ -572,6 +608,7 @@ def fill_replay(
                     obs,
                     demo,
                     episode_keypoints,
+                    sub_goal_keypoints,
                     cameras,
                     rlbench_scene_bounds,
                     voxel_sizes,

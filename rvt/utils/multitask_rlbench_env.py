@@ -32,8 +32,13 @@ from yarr.envs.rlbench_env import (
 from colosseum import (
     ASSETS_CONFIGS_FOLDER,
     ASSETS_JSON_FOLDER,
-    TASKS_PY_FOLDER,
     TASKS_TTM_FOLDER,
+    ASSETS_ATOMIC_CONFIGS_FOLDER,
+    ASSETS_ATOMIC_JSON_FOLDER,
+    ATOMIC_TASKS_TTM_FOLDER,
+    ASSETS_COMPOSITIONAL_CONFIGS_FOLDER,
+    ASSETS_COMPOSITIONAL_JSON_FOLDER,
+    COMPOSITIONAL_TASKS_TTM_FOLDER
 )
 from colosseum.rlbench.extensions.environment import EnvironmentExt
 from colosseum.rlbench.utils import (
@@ -152,16 +157,36 @@ class MultiTaskRLBenchEnv(MultiTaskEnv):
         self._task = self._rlbench_env.get_task(task)
 
         descriptions, _ = self._task.reset()
-        self._lang_goal = descriptions[0] # first description variant
+        self.descriptions = descriptions
+        try:
+            self._lang_goal = descriptions['vanilla'][0]
+        except:
+            self._lang_goal = descriptions[0]
+        # self._lang_goal = descriptions[0] # first description variant
 
     def extract_obs(self, obs: Observation):
         extracted_obs = _extract_obs(obs, self._channels_last, self._observation_config)
         if self._include_lang_goal_in_obs:
             extracted_obs['lang_goal_tokens'] = tokenize([self._lang_goal])[0].numpy()
             extracted_obs['lang_goal_tokens_bbox'] = tokenize(['Focus on red bounding box, ' + self._lang_goal])[0].numpy()
+            try:
+                extracted_obs['oracle_lang_goal_tokens'] = tokenize(self.descriptions["oracle_half"][0].split('\n')).numpy()
+                new_descriptions = ['Focus on red bounding box, ' + desc for desc in self.descriptions["oracle_half"][0].split('\n')]
+                extracted_obs['oracle_lang_goal_tokens_bbox'] = tokenize(new_descriptions).numpy()
+            except:
+                pass
         return extracted_obs
 
-    def launch(self):
+    def launch(self, task_type=None):
+        if task_type == "atomic":
+            ASSETS_CONFIGS_FOLDER = ASSETS_ATOMIC_CONFIGS_FOLDER
+            ASSETS_JSON_FOLDER = ASSETS_ATOMIC_JSON_FOLDER
+            TASKS_TTM_FOLDER = ATOMIC_TASKS_TTM_FOLDER
+        elif task_type == "compositional":
+            ASSETS_CONFIGS_FOLDER = ASSETS_COMPOSITIONAL_CONFIGS_FOLDER
+            ASSETS_JSON_FOLDER = ASSETS_COMPOSITIONAL_JSON_FOLDER
+            TASKS_TTM_FOLDER = COMPOSITIONAL_TASKS_TTM_FOLDER
+            
         base_cfg_path = os.path.join(ASSETS_CONFIGS_FOLDER, f"{self._base_cfg_name[self._active_task_id]}.yaml")
         if os.path.exists(base_cfg_path):
             with open(base_cfg_path, 'r') as f:
@@ -211,7 +236,12 @@ class MultiTaskRLBenchEnv(MultiTaskEnv):
         self._episodes_this_task += 1
 
         descriptions, obs = self._task.reset()
-        self._lang_goal = descriptions[0] # first description variant
+        self.descriptions = descriptions
+        try:
+            self._lang_goal = descriptions['vanilla'][0]
+        except:
+            self._lang_goal = descriptions[0]
+        # self._lang_goal = descriptions[0] # first description variant
         extracted_obs = self.extract_obs(obs)
 
         return extracted_obs

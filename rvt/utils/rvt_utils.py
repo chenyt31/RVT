@@ -237,6 +237,7 @@ def get_eval_parser():
     parser.add_argument("--lang_type", type=str, default='clip')
     parser.add_argument("--agent_type", type=str, default='original')
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--tasks_type", type=str, default="")
     return parser
 
 

@@ -49,13 +49,24 @@ def cache_fn(f):
 
     return cached_fn
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-8):
+        super().__init__()
+        self.eps = eps
+        self.scale = nn.Parameter(torch.ones(dim))  # learnable γ
+
+    def forward(self, x):
+        # x: [..., dim]
+        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).sqrt()
+        return x / rms * self.scale
 
 class PreNorm(nn.Module):
-    def __init__(self, dim, fn, context_dim=None):
+    def __init__(self, dim, fn, context_dim=None, use_rmsnorm=False):
         super().__init__()
+        Norm = RMSNorm if use_rmsnorm else nn.LayerNorm
         self.fn = fn
-        self.norm = nn.LayerNorm(dim)
-        self.norm_context = nn.LayerNorm(context_dim) if exists(context_dim) else None
+        self.norm = Norm(dim)
+        self.norm_context = Norm(context_dim) if exists(context_dim) else None
 
     def forward(self, x, **kwargs):
         x = self.norm(x)

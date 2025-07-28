@@ -68,6 +68,7 @@ class MVT(nn.Module):
         renderer_device="cuda:0",
         renderer=None,
         no_feat=False,
+        use_rmsnorm=False
     ):
         """MultiView Transfomer
 
@@ -157,6 +158,7 @@ class MVT(nn.Module):
         self.rot_ver = rot_ver
         self.num_rot = num_rot
         self.no_feat = no_feat
+        self.use_rmsnorm = use_rmsnorm
 
         if self.cvx_up:
             assert not self.inp_pre_con, (
@@ -296,6 +298,7 @@ class MVT(nn.Module):
                 dropout=attn_dropout,
                 use_fast=xops,
             ),
+            use_rmsnorm=self.use_rmsnorm
         )
         get_attn_ff = lambda: PreNorm(attn_dim, FeedForward(attn_dim))
         get_attn_attn, get_attn_ff = map(cache_fn, (get_attn_attn, get_attn_ff))

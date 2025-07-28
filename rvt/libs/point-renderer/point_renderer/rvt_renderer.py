@@ -2,7 +2,6 @@ import torch
 import point_renderer.ops as ops
 from point_renderer.cameras import OrthographicCameras, PerspectiveCameras
 from point_renderer.renderer import PointRenderer
-from mvt.utils import ForkedPdb
 
 import point_renderer.rvt_ops as rvt_ops
 

@@ -25,8 +25,8 @@ IMAGE_SIZE = 256
 VOXEL_SIZES = [100]  # 100x100x100 voxels
 LOW_DIM_SIZE = 4  # {left_finger_joint, right_finger_joint, gripper_open, timestep}
 
-DATA_FOLDER = "/data1/cyt/HiMan_data"
-TRAIN_REPLAY_STORAGE_DIR = "/data1/cyt/HiMan_data/replay/replay_train_with_goal_lang_t5" # path to save buffer
+# DATA_FOLDER = "/data1/cyt/HiMan_data"
+# TRAIN_REPLAY_STORAGE_DIR = "/data1/cyt/HiMan_data/replay/replay_train_with_goal_lang_t5" # path to save buffer
 EPISODE_FOLDER = "episode%d"
 VARIATION_DESCRIPTIONS_PKL = "variation_descriptions.pkl"  # the pkl file that contains language goals for each demonstration
 DEMO_AUGMENTATION_EVERY_N = 10  # sample n-th frame in demo
@@ -34,7 +34,7 @@ ROTATION_RESOLUTION = 5  # degree increments per axis
 # settings
 NUM_LATENTS = 512  # PerceiverIO latents
 CONTACT_BASE_CATEGORIES = []
-NUM_TRAIN = 10
+# NUM_TRAIN = 10
 
 def _norm_rgb(x):
     return (x.float() / 255.0) * 2.0 - 1.0

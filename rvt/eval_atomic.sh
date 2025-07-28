@@ -6,13 +6,11 @@ export agent_type=$5
 export device=$6
 export port=$7
 
-export DEMO_PATH_ROOT=/data1/cyt/HiMan_data/test
+export DEMO_PATH_ROOT=/data1/cyt/HiMan_data/train
 export TF_CPP_MIN_LOG_LEVEL=3
 
 for root_task in \
     "open_drawer"; do
-
-        
     for i in {0..17}; do
         export task_name=${root_task}_${i}
         export DATA_PATH=$DEMO_PATH_ROOT/$task_name/
@@ -35,22 +33,24 @@ for root_task in \
                 --visualize_bbox \
                 --lang_type $lang_type \
                 --agent_type $agent_type \
-                --port $port
+                --port $port \
+                --tasks_type atomic
         else
-            uv run debugpy --listen 5678 --wait-for-client eval.py \
-                    --model-folder $model_folder \
-                    --eval-datafolder $DEMO_PATH_ROOT \
-                    --tasks $task_name \
-                    --eval-episodes 1 \
-                    --log-name epoch_${epoch} \
-                    --device $device \
-                    --headless \
-                    --model-name model_${epoch}.pth \
-                    --colosseum \
-                    --save-video \
-                    --lang_type $lang_type \
-                    --agent_type $agent_type \
-                    --port $port
+            uv run eval.py \
+                --model-folder $model_folder \
+                --eval-datafolder $DEMO_PATH_ROOT \
+                --tasks $task_name \
+                --eval-episodes 20 \
+                --log-name epoch_${epoch} \
+                --device $device \
+                --headless \
+                --model-name model_${epoch}.pth \
+                --colosseum \
+                --save-video \
+                --lang_type $lang_type \
+                --agent_type $agent_type \
+                --port $port \
+                --tasks_type atomic
         fi
     done
 

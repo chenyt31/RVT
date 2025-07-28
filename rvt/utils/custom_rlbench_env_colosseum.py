@@ -210,6 +210,7 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
                  task_classes: List[Type[Task]],
                  observation_config: ObservationConfig,
                  action_mode: ActionMode,
+                 subtask_length: int,
                  episode_length: int,
                  dataset_root: str = '',
                  channels_last: bool = False,
@@ -234,6 +235,7 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
         self._record_cam = None
         self._previous_obs, self._previous_obs_dict = None, None
         self._recorded_images = []
+        self._subtask_length = subtask_length
         self._episode_length = episode_length
         self._time_in_state = time_in_state
         self._record_every_n = record_every_n
@@ -272,7 +274,7 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
 
         if self._time_in_state:
             time = (1. - ((self._i if t is None else t) / float(
-                self._episode_length - 1))) * 2. - 1.
+                self._subtask_length - 1))) * 2. - 1.
             obs_dict['low_dim_state'] = np.concatenate(
                 [obs_dict['low_dim_state'], [time]]).astype(np.float32)
 
@@ -283,8 +285,8 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
         # obs_dict['gripper_pose'] = grip_pose
         return obs_dict
 
-    def launch(self):
-        super(CustomMultiTaskRLBenchEnv, self).launch()
+    def launch(self, task_type=None):
+        super(CustomMultiTaskRLBenchEnv, self).launch(task_type=task_type)
         self._task._scene.register_step_callback(self._my_callback)
         if self.eval:
             cam_placeholder = Dummy('cam_cinematic_placeholder')
@@ -303,6 +305,9 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
         self._episode_index += 1
         self._recorded_images.clear()
         return self._previous_obs_dict
+    
+    def reset_timestep(self):
+        self._i = 0
 
     def register_callback(self, func):
         self._task._scene.register_step_callback(func)
@@ -328,6 +333,7 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
         obs = self._previous_obs_dict  # in case action fails.
 
         try:
+            # action = action.copy()
             # action[3:7] = [action[6], action[3], action[4], action[5]] # xyzw -> wxyz
             obs, reward, terminal = self._task.step(action)
             if reward >= 1:
@@ -353,6 +359,9 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
 
         summaries = []
         self._i += 1
+        if act_result.gripper_change:
+            self.reset_timestep()
+        # TODO: Go Home when gripper change to open
         try:
             obs = self.extract_obs(obs)
         except:
@@ -431,7 +440,7 @@ class CustomMultiTaskRLBenchEnv2(CustomMultiTaskRLBenchEnv):
         # self._task.set_variation(-1)
 
         if self._task_class_variation_idx != None:
-            self._task.set_variation(0)
+            self._task.set_variation(-1)
             self._task._task.task_path = self._task._task.name + f"_{str(self._task_class_variation_idx[self._active_task_id])}"
         else:
             self._task.set_variation(-1)
@@ -443,7 +452,11 @@ class CustomMultiTaskRLBenchEnv2(CustomMultiTaskRLBenchEnv):
 
         self._task.set_variation(d.variation_number)
         desc, obs = self._task.reset_to_demo(d)
-        self._lang_goal = desc[0]
+        self.descriptions = desc
+        try:
+            self._lang_goal = desc['vanilla'][0]
+        except:
+            self._lang_goal = desc[0]
 
         self._previous_obs_dict = self.extract_obs(obs)
         self._record_current_episode = (

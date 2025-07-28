@@ -61,7 +61,7 @@ from rvt.utils.rvt_utils import load_agent as load_agent_state
 import os 
 
 from colosseum.rlbench.utils import name_to_class
-from colosseum import TASKS_PY_FOLDER
+from colosseum import TASKS_PY_FOLDER, ATOMIC_TASKS_PY_FOLDER, COMPOSITIONAL_TASKS_PY_FOLDER
 from rvt.utils.t5_encoder import T5Embedder
 from rvt.models.remote_agent import WebsocketClientPolicyAgent
 
@@ -161,6 +161,7 @@ def eval(
     eval_datafolder,
     start_episode=0,
     eval_episodes=25,
+    subtask_length=15,
     episode_length=25,
     replay_ground_truth=False,
     device=0,
@@ -195,26 +196,6 @@ def eval(
     ]
 
     task_classes = []
-    # if tasks[0] == "all":
-    #     _tasks = COLOSSEUM_TASKS
-    #     tasks = []
-    #     for t in _tasks:
-    #         for i in range(18):
-    #             tasks.append(f"{t}_{i}")
-    #     if verbose:
-    #         print(f"evaluate on {len(tasks)} tasks: ", tasks)
-    # else:
-    #     _tasks = tasks
-    #     tasks = []
-    #     for t in _tasks:
-    #         for i in range(18):
-    #             _eval_datafolder = os.path.join(eval_datafolder, f"{t}_{i}")
-    #             if not os.path.exists(_eval_datafolder):
-    #                 print(f"Task {t}_{i} does not exist in {_eval_datafolder}")
-    #             else:
-    #                 tasks.append(f"{t}_{i}")
-    #     if verbose:
-    #         print(f"evaluate on {len(tasks)} tasks: ", tasks)
     if args.colosseum:
         task_class_variation_idx = []
         task_class_base = []
@@ -222,7 +203,12 @@ def eval(
             task_class_base.append('_'.join(task.split('_')[:-1]))
             if task_class_base[-1] not in task_files:
                 raise ValueError('Task %s not recognised!.' % task)
-            task_class = name_to_class(task_class_base[-1], TASKS_PY_FOLDER) # task_file_to_task_class(task_class_base)
+            if args.tasks_type == 'atomic':
+                task_class = name_to_class(task_class_base[-1], ATOMIC_TASKS_PY_FOLDER)
+            elif args.tasks_type == 'compositional':
+                task_class = name_to_class(task_class_base[-1], COMPOSITIONAL_TASKS_PY_FOLDER)
+            else:
+                task_class = name_to_class(task_class_base[-1], TASKS_PY_FOLDER) # task_file_to_task_class(task_class_base)
             task_class_variation_idx.append(int(task.split('_')[-1]))
             task_classes.append(task_class)
     else:
@@ -240,6 +226,7 @@ def eval(
         observation_config=obs_config,
         action_mode=action_mode,
         dataset_root=eval_datafolder,
+        subtask_length=subtask_length,
         episode_length=episode_length,
         headless=headless,
         swap_task_every=eval_episodes,
@@ -269,7 +256,7 @@ def eval(
     rollout_generator = RolloutGenerator(device)
     stats_accumulator = SimpleAccumulator(eval_video_fps=30)
 
-    eval_env.launch()
+    eval_env.launch(args.tasks_type)
 
     current_task_id = -1
 

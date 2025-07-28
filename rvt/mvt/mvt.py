@@ -97,6 +97,7 @@ class MVT(nn.Module):
         st_wpt_loc_inp_no_noise,
         img_aug_2,
         renderer_device="cuda:0",
+        use_rmsnorm=False
     ):
         """MultiView Transfomer
         :param stage_two: whether or not there are two stages
