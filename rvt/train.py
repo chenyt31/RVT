@@ -231,7 +231,7 @@ def experiment(rank, cmd_args, devices, port):
             renderer_device=device,
             add_lang=cmd_args.add_lang,
             add_lang_t5=cmd_args.add_lang_t5,
-            use_rmsnorm=cmd_args.use_rmsnorm
+            use_rmsnorm=cmd_args.use_rmsnorm,
             **mvt_cfg,
         ).to(device)
         if ddp:
