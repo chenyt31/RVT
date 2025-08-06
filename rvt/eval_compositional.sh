@@ -6,20 +6,22 @@ export agent_type=$5
 export device=$6
 export port=$7
 
-export DEMO_PATH_ROOT=/data1/cyt/HiMan_data/test_atomic
+export DEMO_PATH_ROOT=/data1/cyt/HiMan_data/test_compositional
 export TF_CPP_MIN_LOG_LEVEL=3
 
 for root_task in \
-    "box_in_cupboard" \
-    "box_out_of_opened_drawer" \
-    "close_drawer" \
-    "put_in_opened_drawer" \
-    "sweep_to_dustpan" \
-    "box_out_of_cupboard" \
-    "broom_out_of_cupboard" \
-    "open_drawer" \
-    "rubbish_in_dustpan" \
-    "take_out_of_opened_drawer"; do
+    "box_exchange" \
+    "put_in_and_close" \
+    "put_in_without_close" \
+    "put_two_in_different" \
+    "put_two_in_same" \
+    "retrieve_and_sweep" \
+    "sweep_and_drop" \
+    "take_out_and_close" \
+    "take_out_without_close" \
+    "take_two_out_of_different" \
+    "take_two_out_of_same" \
+    "transfer_box"; do
     for i in {0..17}; do
         export task_name=${root_task}_${i}
         export DATA_PATH=$DEMO_PATH_ROOT/$task_name/
@@ -43,7 +45,7 @@ for root_task in \
                 --lang_type $lang_type \
                 --agent_type $agent_type \
                 --port $port \
-                --tasks_type atomic
+                --tasks_type compositional
         else
             uv run eval.py \
                 --model-folder $model_folder \
@@ -59,7 +61,7 @@ for root_task in \
                 --lang_type $lang_type \
                 --agent_type $agent_type \
                 --port $port \
-                --tasks_type atomic
+                --tasks_type compositional
         fi
     done
 

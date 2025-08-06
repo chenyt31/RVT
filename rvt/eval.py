@@ -199,8 +199,8 @@ def eval(
         task_class_base = []
         for task in tasks:
             task_class_base.append('_'.join(task.split('_')[:-1]))
-            if task_class_base[-1] not in task_files:
-                raise ValueError('Task %s not recognised!.' % task)
+            # if task_class_base[-1] not in task_files:
+            #     raise ValueError('Task %s not recognised!.' % task)
             if args.tasks_type == 'atomic':
                 task_class = name_to_class(task_class_base[-1], ATOMIC_TASKS_PY_FOLDER)
             elif args.tasks_type == 'compositional':
@@ -310,7 +310,8 @@ def eval(
                 continue
             except Exception as e:
                 eval_env.shutdown()
-                raise e
+                print(e)
+                continue
 
             for transition in episode_rollout:
                 stats_accumulator.step(transition, True)
@@ -369,9 +370,9 @@ def eval(
                 try:
                     task_score = 100.0 if csv_results["success rate"] else 0.0
                 except:
-                    task_score = "unknown"
+                    task_score = 0.0
         else:
-            task_score = "unknown"
+            task_score = 0.0
 
         print(f"[Evaluation] Finished {task_name} | Final Score: {task_score}\n")
 
@@ -433,8 +434,14 @@ def eval(
                         )
 
                         print(f'video saved - {task_name}')
-                        os.remove(palette_image_path)
-                        shutil.rmtree(video_image_folder)
+                        try:
+                            os.remove(palette_image_path)
+                        except:
+                            pass
+                        try:
+                            shutil.rmtree(video_image_folder)
+                        except:
+                            pass
 
     eval_env.shutdown()
 

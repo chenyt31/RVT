@@ -53,6 +53,7 @@ def load_agent(
     device=0,
     use_input_place_with_mean=False,
     lang_type='clip',
+    use_rmsnorm=False,
 ):
     device = f"cuda:{device}"
     assert model_path is not None
@@ -81,14 +82,8 @@ def load_agent(
         mvt_cfg.merge_from_file(mvt_cfg_path)
     else:
         mvt_cfg.merge_from_file(os.path.join(model_folder, "mvt_cfg.yaml"))
-    if lang_type == 't5':
-        mvt_cfg.add_lang_t5 = True
-    else:
-        mvt_cfg.add_lang_t5 = False
-    if lang_type == 'clip':
-        mvt_cfg.add_lang = True
-    else:
-        mvt_cfg.add_lang = False
+    add_lang_t5 = lang_type == 't5'
+    add_lang = lang_type == 'clip'
     mvt_cfg.freeze()
 
     # for rvt-2 we do not change place_with_mean regardless of the arg
@@ -101,6 +96,9 @@ def load_agent(
 
     rvt = MVT(
         renderer_device=device,
+        use_rmsnorm=use_rmsnorm,
+        add_lang_t5=add_lang_t5,
+        add_lang=add_lang,
         **mvt_cfg,
     )
     t5_embedder = None
@@ -110,8 +108,8 @@ def load_agent(
     agent = rvt_agent.RVTAgent(
         network=rvt.to(device),
         image_resolution=[IMAGE_SIZE, IMAGE_SIZE],
-        add_lang=mvt_cfg.add_lang,
-        add_lang_t5=mvt_cfg.add_lang_t5,
+        add_lang=add_lang,
+        add_lang_t5=add_lang_t5,
         stage_two=mvt_cfg.stage_two,
         rot_ver=mvt_cfg.rot_ver,
         scene_bounds=SCENE_BOUNDS,
@@ -316,6 +314,7 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--use-input-place-with-mean", action="store_true", default=False)
     parser.add_argument("--lang-type", type=str, default="clip")
+    parser.add_argument("--use-rmsnorm", action="store_true", default=False)
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
 
@@ -330,6 +329,7 @@ if __name__ == "__main__":
         device=args.device,
         use_input_place_with_mean=args.use_input_place_with_mean,
         lang_type=args.lang_type,
+        use_rmsnorm=args.use_rmsnorm,
     )
     agent.eval()
     if isinstance(agent, rvt_agent.RVTAgent):
