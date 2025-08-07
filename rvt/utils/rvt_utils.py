@@ -238,6 +238,9 @@ def get_eval_parser():
     parser.add_argument("--agent_type", type=str, default='original')
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--tasks_type", type=str, default="")
+
+    parser.add_argument("--high_level_mode", type=str, default="")
+    parser.add_argument("--high_level_cfg_path", type=str, default="")
     return parser
 
 

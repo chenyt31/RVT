@@ -64,6 +64,7 @@ from colosseum.rlbench.utils import name_to_class
 from colosseum import TASKS_PY_FOLDER, ATOMIC_TASKS_PY_FOLDER, COMPOSITIONAL_TASKS_PY_FOLDER
 from rvt.utils.t5_encoder import T5Embedder
 from rvt.models.remote_agent import WebsocketClientPolicyAgent
+from src.high_level.pipeline import Pipeline
 
 def load_agent(
     model_path=None,
@@ -174,6 +175,8 @@ def eval(
     zoom_in=False,
     lang_type='clip',
     agent_type='original',
+    high_level_mode="oracle",
+    pipeline=None,
 ):
     if agent_type != 'remote':
         agent.eval()
@@ -301,6 +304,8 @@ def eval(
                 visualize=visualize,
                 visualize_save_dir=visualize_save_dir,
                 agent_type=agent_type,
+                high_level_mode=high_level_mode,
+                pipeline=pipeline,
             )
             try:
                 for replay_transition in generator:
@@ -370,9 +375,9 @@ def eval(
                 try:
                     task_score = 100.0 if csv_results["success rate"] else 0.0
                 except:
-                    task_score = 0.0
+                    task_score = "unknown"
         else:
-            task_score = 0.0
+            task_score = "unknown"
 
         print(f"[Evaluation] Finished {task_name} | Final Score: {task_score}\n")
 
@@ -396,7 +401,7 @@ def eval(
                         lang_goal = language_goals.pop(0)
                     except:
                         lang_goal = "None"
-                    lang_goal=lang_goal.replace(" ", "_")
+                    lang_goal=lang_goal.replace(" ", "_").replace("(", "").replace(")", "")
                     video = deepcopy(summary.value)
                     video = np.transpose(video, (0, 2, 3, 1))
                     video = video[:, :, :, ::-1]
@@ -422,15 +427,11 @@ def eval(
                             )
                         images_path = os.path.join(video_image_folder, r"%d.png")
                         os.system(
-                            "ffmpeg -y -i {} -vf palettegen {} -hide_banner -loglevel error".format(
-                                images_path, palette_image_path
-                            )
+                            f"bash -c 'ffmpeg -y -i \"{images_path}\" -vf palettegen \"{palette_image_path}\" -hide_banner -loglevel error'"
                         )
                         
                         os.system(
-                            "ffmpeg -y -framerate {} -i {} -i {} -lavfi paletteuse {} -hide_banner -loglevel error".format(
-                                record_fps, images_path, palette_image_path, video_path
-                            )
+                            f"bash -c 'ffmpeg -y -framerate {record_fps} -i \"{images_path}\" -i \"{palette_image_path}\" -lavfi paletteuse \"{video_path}\" -hide_banner -loglevel error'"
                         )
 
                         print(f'video saved - {task_name}')
@@ -560,6 +561,23 @@ def _eval(args):
                 )
                 agent_eval_log_dir = os.path.join(args.eval_log_dir, "final")
 
+        if args.high_level_mode == "vlm":
+            # load high level model
+            if args.high_level_cfg_path is None:
+                raise ValueError("high_level_cfg_path is required")
+            high_level_cfg = OmegaConf.load(args.high_level_cfg_path)
+            pipeline = Pipeline(
+                mode=high_level_cfg.mode,
+                model_name=high_level_cfg.model_name,
+                ip=high_level_cfg.ip,
+                port=high_level_cfg.port,
+                device=high_level_cfg.device,
+                tmp_dir=high_level_cfg.tmp_dir,
+            )
+        else:
+            pipeline = None
+
+
         os.makedirs(agent_eval_log_dir, exist_ok=True)
         scores = eval(
             agent=agent,
@@ -581,6 +599,8 @@ def _eval(args):
             zoom_in=args.zoom_in,
             lang_type=args.lang_type,
             agent_type=args.agent_type,
+            high_level_mode=args.high_level_mode,
+            pipeline=pipeline,
         )
         print(f"model {model_path}, scores {scores}")
         task_scores = {}

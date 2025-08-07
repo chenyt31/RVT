@@ -22,6 +22,18 @@ from yarr.envs.env import Env
 from yarr.utils.transition import ReplayTransition
 from yarr.agents.agent import ActResult
 from pyrep.objects.dummy import Dummy
+from src.high_level.pipeline import Pipeline
+import rvt.mvt.utils as mvt_utils
+import rvt.utils.rvt_utils as rvt_utils
+import rvt.utils.peract_utils as peract_utils
+from clip import tokenize
+
+def get_vlm_data(obs_history, env_device):
+    observation = {k: torch.tensor(np.array([v]), device=env_device) for k, v in obs_history.items()}
+    obs, pcd = peract_utils._preprocess_inputs(observation, ["front", "left_shoulder", "right_shoulder", "wrist"])
+    pcd_flat, img_feat = rvt_utils.get_pc_img_feat(obs, pcd)
+    
+    return pcd_flat, img_feat
 
 class RolloutGenerator(object):
 
@@ -115,7 +127,7 @@ class RolloutGenerator(object):
             if transition.info.get("needs_reset", transition.terminal):
                 return
 
-    def _init_episode(self, env:Env, eval, demo_seed, use_sub_goal, planner_type):
+    def _init_episode(self, env:Env, eval, demo_seed, use_sub_goal, high_level_mode):
         if eval:
             obs = env.reset_to_demo(demo_seed)
             goal_actions = keypoints_idx = all_action = all_idx = None
@@ -126,7 +138,7 @@ class RolloutGenerator(object):
             goal_actions = None
 
         oracle_lang_goal = []
-        if planner_type == "oracle":
+        if high_level_mode == "oracle":
             oracle_lang_goal = env.descriptions["oracle_half"][0].split('\n')
         return obs, oracle_lang_goal, goal_actions
 
@@ -142,19 +154,21 @@ class RolloutGenerator(object):
         os.makedirs(dir_path, exist_ok=True)
         return dir_path
     
-    def _handle_gripper(self, act_result, prev_gripper, planner_type, oracle_index, oracle_lang_goal):
+    def _handle_gripper(self, act_result, prev_gripper, high_level_mode, oracle_index, oracle_lang_goal):
         curr_gripper = 1 - int(act_result.action[-2])
         return_home = False
-
+        call_high_level = False
         if curr_gripper != prev_gripper:
             act_result.gripper_change = True
-            if planner_type == "oracle":
+            if high_level_mode == "oracle":
                 oracle_index = (oracle_index + 1) % len(oracle_lang_goal)
+            elif high_level_mode == "vlm":
+                call_high_level = True
             if curr_gripper == 0:
                 act_result.gripper_change_twice = True
                 return_home = True
 
-        return act_result, curr_gripper, oracle_index, return_home
+        return act_result, curr_gripper, oracle_index, return_home, call_high_level
     
     def _combine_obs_elements(self, obs, act_result):
         combined = dict(obs)
@@ -163,14 +177,14 @@ class RolloutGenerator(object):
         return combined
     
     def _prepare_data(self, obs_history, agent_type, use_sub_goal,
-                  oracle_lang_goal, oracle_index, goal_actions, planner_type,
-                  env, visualize, visualize_save_dir, visual_prompt_type):
+                  oracle_lang_goal, oracle_index, goal_actions, high_level_mode,
+                  env, visualize, visualize_save_dir, visual_prompt_type, pipeline, call_high_level):
         if agent_type == 'remote':
             data = {k: np.array([v]) for k, v in obs_history.items()}
         else:
             data = {k: torch.tensor(np.array([v]), device=self._env_device) for k, v in obs_history.items()}
 
-        if planner_type == 'oracle':
+        if high_level_mode == 'oracle':
             lang = oracle_lang_goal[oracle_index]
             data["lang_goal"] = lang
             data["lang_goal_bbox"] = 'Focus on red bounding box, ' + lang
@@ -178,9 +192,36 @@ class RolloutGenerator(object):
             data["lang_goal_tokens_bbox"] = data["oracle_lang_goal_tokens_bbox"][:, :, oracle_index, :]
             if use_sub_goal:
                 data["sub_goal_wpt"] = np.array([goal_actions[oracle_index]], dtype=np.float32)
-        elif planner_type == "vanilla":
+        elif high_level_mode == "vanilla":
             data["lang_goal"] = env._lang_goal
             data["lang_goal_bbox"] = 'Focus on red bounding box, ' + env._lang_goal
+        elif high_level_mode == "vlm":
+            if call_high_level:
+                pcd_flat, img_feat = get_vlm_data(obs_history, pipeline.device)
+                # === inference patch and sub_task ===
+                result = pipeline.run(
+                    pcd=pcd_flat,
+                    img_feat=img_feat,
+                    task_description=env._lang_goal,
+                    fields=("patch", "sub_task")
+                )
+                self.result = result
+            # === process result ===
+            try:
+                if use_sub_goal:
+                    data["sub_goal_wpt"] = self.result["_3d_loc_ori"][0].cpu().numpy().astype(np.float32)
+                sub_task = self.result["sub_task"][0][0]
+                data["lang_goal"] = sub_task
+                data["lang_goal_bbox"] = 'Focus on red bounding box, ' + sub_task
+                data["lang_goal_tokens"] = tokenize([sub_task])[0].numpy()
+                data["lang_goal_tokens_bbox"] = tokenize(['Focus on red bounding box, ' + sub_task])[0].numpy()
+            except:
+                print("Error in vlm inference")
+                data["lang_goal"] = "manipulate the object"
+                data["lang_goal_bbox"] = 'Focus on red bounding box, ' + "manipulate the object"
+                data["lang_goal_tokens"] = tokenize(["manipulate the object"])[0].numpy()
+                data["lang_goal_tokens_bbox"] = tokenize(['Focus on red bounding box, ' + "manipulate the object"])[0].numpy()
+            print('data["lang_goal"]', data["lang_goal"])
 
         data.update({
             'visualize': visualize,
@@ -201,24 +242,49 @@ class RolloutGenerator(object):
                             visualize_save_dir=prepped_data['visualize_save_dir'])
     
     def _final_step_act(self, obs_history, oracle_lang_goal, oracle_index, goal_actions,
-                    planner_type, env, agent, step_signal, visualize,
+                    high_level_mode, env, agent, step_signal, visualize,
                     visualize_save_dir, visual_prompt_type, agent_type,
-                    eval, use_sub_goal, replay_transition, obs_tp1):
+                    eval, use_sub_goal, replay_transition, obs_tp1, pipeline, call_high_level):
         if agent_type == 'remote':
             prepped_data = {k: np.array([v]) for k, v in obs_history.items()}
         else:
             prepped_data = {k: torch.tensor(np.array([v]), device=self._env_device) for k, v in obs_history.items()}
 
-        if planner_type == "oracle":
+        if high_level_mode == "oracle":
             prepped_data["lang_goal"] = oracle_lang_goal[oracle_index]
             prepped_data["lang_goal_bbox"] = 'Focus on red bounding box, ' + oracle_lang_goal[oracle_index]
             prepped_data["lang_goal_tokens"] = prepped_data["oracle_lang_goal_tokens"][:, :, oracle_index, :]
             prepped_data['lang_goal_tokens_bbox'] = prepped_data["oracle_lang_goal_tokens_bbox"][:, :, oracle_index, :]
             if use_sub_goal:
                 prepped_data["sub_goal_wpt"] = np.array([goal_actions[oracle_index]], dtype=np.float32)
-        elif planner_type == "vanilla":
+        elif high_level_mode == "vanilla":
             prepped_data["lang_goal"] = env._lang_goal
             prepped_data["lang_goal_bbox"] = 'Focus on red bounding box, ' + env._lang_goal
+        elif high_level_mode == "vlm":
+            if call_high_level:
+                pcd_flat, img_feat = get_vlm_data(obs_history, pipeline.device)
+                # === inference patch and sub_task ===
+                result = pipeline.run(
+                    pcd=pcd_flat,
+                    img_feat=img_feat,
+                    task_description=env._lang_goal,
+                    fields=("patch", "sub_task")
+                )
+                self.result = result
+            try:
+                # === process result ===
+                if use_sub_goal:
+                    prepped_data["sub_goal_wpt"] = self.result["_3d_loc_ori"][0].cpu().numpy().astype(np.float32)
+                prepped_data["lang_goal"] = self.result["sub_task"][0][0]
+                prepped_data["lang_goal_bbox"] = 'Focus on red bounding box, ' + self.result["sub_task"][0][0]
+                prepped_data["lang_goal_tokens"] = tokenize([self.result["sub_task"][0][0]])[0].numpy()
+                prepped_data["lang_goal_tokens_bbox"] = tokenize(['Focus on red bounding box, ' + self.result["sub_task"][0][0]])[0].numpy()
+            except:
+                print("Error in vlm inference")
+                prepped_data["lang_goal"] = "manipulate the object"
+                prepped_data["lang_goal_bbox"] = 'Focus on red bounding box, ' + "manipulate the object"
+                prepped_data["lang_goal_tokens"] = tokenize(["manipulate the object"])[0].numpy()
+                prepped_data["lang_goal_tokens_bbox"] = tokenize(['Focus on red bounding box, ' + "manipulate the object"])[0].numpy()
 
         act_result = self._run_agent(agent, agent_type, step_signal, prepped_data, eval)
         agent_obs_tp1 = {k: np.array(v) for k, v in act_result.observation_elements.items()}
@@ -235,11 +301,12 @@ class RolloutGenerator(object):
                   visualize=False,
                   visualize_save_dir="",
                   agent_type='original',
-                  planner_type="oracle",
+                  high_level_mode="oracle",
+                  pipeline: Pipeline | None = None,
                   ):     
 
         use_sub_goal = 'bbox' in visual_prompt_type or 'zoom_in' in visual_prompt_type
-        obs, oracle_lang_goal, goal_actions = self._init_episode(env, eval, eval_demo_seed, use_sub_goal, planner_type)
+        obs, oracle_lang_goal, goal_actions = self._init_episode(env, eval, eval_demo_seed, use_sub_goal, high_level_mode)
         home_pose = self._get_home_pose()
         if agent_type != 'remote':
             agent.reset()
@@ -249,6 +316,7 @@ class RolloutGenerator(object):
 
         prev_gripper = 0
         return_home = False
+        call_high_level = True
         oracle_index = 0
         for step in range(episode_length):
             if return_home:
@@ -257,12 +325,12 @@ class RolloutGenerator(object):
             else:
                 prepped_data = self._prepare_data(obs_history, agent_type, use_sub_goal,
                                               oracle_lang_goal, oracle_index,
-                                              goal_actions, planner_type, env,
-                                              visualize, visualize_save_dir, visual_prompt_type)
+                                              goal_actions, high_level_mode, env,
+                                              visualize, visualize_save_dir, visual_prompt_type, pipeline, call_high_level)
                 act_result = self._run_agent(agent, agent_type, step_signal, prepped_data, eval)
 
-            act_result, curr_gripper, oracle_index, return_home = self._handle_gripper(
-                act_result, prev_gripper, planner_type, oracle_index, oracle_lang_goal)
+            act_result, curr_gripper, oracle_index, return_home, call_high_level = self._handle_gripper(
+                act_result, prev_gripper, high_level_mode, oracle_index, oracle_lang_goal)
             prev_gripper = curr_gripper
 
             transition = env.step(act_result)
@@ -289,9 +357,9 @@ class RolloutGenerator(object):
                 # one last time (i.e. acting in the terminal state).
                 if len(act_result.observation_elements) > 0:
                     replay_transition = self._final_step_act(obs_history, oracle_lang_goal, oracle_index, goal_actions,
-                                                     planner_type, env, agent, step_signal, visualize,
+                                                     high_level_mode, env, agent, step_signal, visualize,
                                                      visualize_save_dir, visual_prompt_type, agent_type,
-                                                     eval, use_sub_goal, replay_transition, obs_tp1)
+                                                     eval, use_sub_goal, replay_transition, obs_tp1, pipeline, call_high_level)
 
             if record_enabled and transition.terminal or timeout or step == episode_length - 1:
                 env.env._action_mode.arm_action_mode.record_end(env.env._scene,
